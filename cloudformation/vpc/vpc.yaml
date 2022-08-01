@@ -1,0 +1,350 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Virtual Private Cloud
+
+Parameters:
+  VPCName:
+    Description: The name of the VPC
+    Type: String
+    Default: interview-challenge
+  CidrBlock:
+    Description: The CIDR block to use for the VPC (usually 10.x.0.0/16)
+    Type: String
+    Default: 10.200.0.0/16
+  PublicSubnetIpBlockA:
+    Description: public subnet IP block A
+    Type: String
+    Default: 10.200.10.0/24
+  PublicSubnetIpBlockB:
+    Description: public subnet IP block B
+    Type: String
+    Default: 10.200.11.0/24
+  PrivateSubnetIpBlockA:
+    Description: private subnet IP block A
+    Type: String
+    Default: 10.200.100.0/24
+  PrivateSubnetIpBlockB:
+    Description: private subnet IP block B
+    Type: String
+    Default: 10.200.101.0/24
+  MyPrivateIp:
+    Description: Enter your own ip address
+    Type: String
+    Default: 8.8.8.8/32
+
+Resources:
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref CidrBlock
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: !Ref VPCName
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${VPCName}-fargate
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName}-InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName}-PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName}-PrivateRouteTable-a
+
+  InternetGatewayRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      GatewayId: !Ref InternetGateway
+      DestinationCidrBlock: 0.0.0.0/0
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref AWS::Region
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnetIpBlockA
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName}-PrivateSubnetA
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 1
+        - Fn::GetAZs: !Ref AWS::Region
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnetIpBlockB
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName}-privateSubnetB
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref AWS::Region
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnetIpBlockA
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName}-PublicSubnetA
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 1
+        - Fn::GetAZs: !Ref AWS::Region
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnetIpBlockB
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName}-publicSubnetB
+
+  AssociatePrivateSubnetAWithPrivateRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  AssociatePrivateSubnetBWithPrivateRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  AssociatePublicSubnetAWithPublicRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  AssociatePublicSubnetBWithPublicRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  RdsPrivateSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription:  !Sub ${VPCName} rds-private
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName}-rds-private
+
+  NatGatewayElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName}-nat-elastic-ip
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayElasticIP.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName}-nat-gateway
+
+  NatRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PublicLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: load balancer security group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          FromPort: 0
+          ToPort: 0
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName}-public-load-balancer
+
+  RestrictedLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: restricted load balancer security group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref MyPrivateIp
+          Description: Allow inbound port 80 from my private ip
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          FromPort: 0
+          ToPort: 0
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName}-restricted-load-balancer
+
+  ServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: service security group
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          FromPort: 0
+          ToPort: 0
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName}-service
+
+  IngressFromPublicLoadBalancerToService:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ServiceSecurityGroup
+      SourceSecurityGroupId: !Ref PublicLoadBalancerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      Description: inbound port 80 from service security group
+
+  IngressFromRestrictedLoadBalancerToService:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ServiceSecurityGroup
+      SourceSecurityGroupId: !Ref RestrictedLoadBalancerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      Description: inbound port 80 from restricted load balancer security group
+
+  RdsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: RDS Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref ServiceSecurityGroup
+          Description: Access from Service Security Group
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName}-rdsRestricted
+
+Outputs:
+  VpcId:
+    Description: The ID of the VPC
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${VPCName}-VpcId
+
+  PrivateSubnetA:
+    Description: Private Subnet A
+    Value: !Ref PrivateSubnetA
+    Export:
+      Name: !Sub ${VPCName}-PrivateSubnetA
+
+  PrivateSubnetB:
+    Description: Private Subnet B
+    Value: !Ref PrivateSubnetB
+    Export:
+      Name: !Sub ${VPCName}-PrivateSubnetB
+
+  PublicSubnet1:
+    Description: Public Subnet A
+    Value: !Ref PublicSubnetA
+    Export:
+      Name: !Sub ${VPCName}-PublicSubnetA
+
+  PublicSubnet2:
+    Description: Public Subnet B
+    Value: !Ref PublicSubnetB
+    Export:
+      Name: !Sub ${VPCName}-PublicSubnetB
+
+  RdsPrivateSubnetGroup:
+    Description: Private subnet group for RDS
+    Value: !Ref RdsPrivateSubnetGroup
+    Export:
+      Name: !Sub ${VPCName}-RdsPrivateSubnetGroup
+
+  ServiceSecurityGroup:
+    Description: Security group for standard boxes
+    Value: !Ref ServiceSecurityGroup
+    Export:
+      Name: !Sub ${VPCName}-ServiceSecurityGroup
+
+  RestrictedLoadBalancerSecurityGroup:
+    Description: Security group for restricted load balancers
+    Value: !Ref RestrictedLoadBalancerSecurityGroup
+    Export:
+      Name: !Sub ${VPCName}-RestrictedLoadBalancerSecurityGroup
+
+  PublicLoadBalancerSecurityGroup:
+    Description: Security group for public load balancers
+    Value: !Ref PublicLoadBalancerSecurityGroup
+    Export:
+      Name: !Sub ${VPCName}-PublicLoadBalancerSecurityGroup
+
+  RdsSecurityGroup:
+    Description: Security group for rds databases
+    Value: !Ref RdsSecurityGroup
+    Export:
+      Name: !Sub ${VPCName}-RdsSecurityGroup
+
+  Cluster:
+    Description: ECS Cluster Name
+    Value: !Ref EcsCluster
+    Export:
+      Name: !Sub ${VPCName}-Cluster
+
+

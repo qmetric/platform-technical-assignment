@@ -1,0 +1,276 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Example service
+Parameters:
+  VPCName:
+    Type: String
+    Description: Name of the VPC to deploy into
+    Default: interview-challenge
+  EnvironmentName:
+    Type: String
+    Description: Name of the Environment
+    Default: dev
+  AppName:
+    Type: String
+    Description: Name of the application
+    Default: my-app
+  ContainerImage:
+    Type: String
+    Description: container image url
+    Default: nginxdemos/hello
+  ContainerPort:
+    Type: String
+    Description: Port exposed by the container
+    Default: '80'
+  DesiredCount:
+    Type: Number
+    Description: Desired number of running tasks in the ecs service
+    Default: 1
+  MySQLRDSMasterPassword:
+    Type: String
+    Description: KMS encrypted string for MySQL RDS master password
+    Default: 'mysecurepassword'
+    NoEcho: true
+  MySQLRDSDatabaseDBInstanceClass:
+    Type: String
+    Description: RDS Instance Class
+    Default: db.t3.micro
+  MySQLRDSDatabaseAllocatedStorage:
+    Type: Number
+    Description: RDS instance allocated storage (Unit is GB)
+    Default: 10
+  RDSStorageType:
+    Type: String
+    Description: RDS Storage Type
+    AllowedValues:
+      - standard
+      - gp2
+    Default: gp2
+  RDSBackupRetentionPeriod:
+    Type: Number
+    Description: RDS Backup retention period in days
+    Default: 0
+
+Resources:
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ExecutionRoleArn: !GetAtt ECSRole.Arn
+      TaskRoleArn: !GetAtt ServiceRole.Arn
+      Family: !Ref AppName
+      Cpu: '256'
+      Memory: '512'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ContainerDefinitions:
+        - Name: !Ref AppName
+          Image: !Ref ContainerImage
+          Environment:
+            - Name: BucketName
+              Value: !Ref S3Bucket
+            - Name: DatabaseName
+              Value: !GetAtt MySQLRDSDatabase.Endpoint.Address
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-group: !Ref 'CloudwatchLogGroup'
+              awslogs-stream-prefix: !Ref AppName
+          DisableNetworking: False
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      AlbListener
+    Properties:
+      SchedulingStrategy: REPLICA
+      Cluster: !ImportValue
+        Fn::Sub: ${VPCName}-Cluster
+      TaskDefinition: !Ref 'TaskDefinition'
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 75
+        MaximumPercent: 200
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: 1.4.0
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue
+                Fn::Sub: ${VPCName}-PrivateSubnetA
+            - !ImportValue
+                Fn::Sub: ${VPCName}-PrivateSubnetB
+          SecurityGroups:
+            - !ImportValue
+                Fn::Sub: ${VPCName}-ServiceSecurityGroup
+      LoadBalancers:
+        - ContainerName: !Ref AppName
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref 'AlbTargetGroup'
+
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: ipv4
+      Scheme: internet-facing
+      SecurityGroups:
+        - !ImportValue
+            Fn::Sub: ${VPCName}-PublicLoadBalancerSecurityGroup
+      Subnets:
+        - !ImportValue
+            Fn::Sub: ${VPCName}-PublicSubnetA
+        - !ImportValue
+            Fn::Sub: ${VPCName}-PublicSubnetB
+
+  AlbTargetGroup:
+    DependsOn:
+      - Alb
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 5
+      HealthCheckPath: /
+      HealthCheckPort: !Ref ContainerPort
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 2
+      HealthyThresholdCount: 2
+      Matcher:
+        HttpCode: 200-299
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      TargetType: ip
+      VpcId: !ImportValue
+        Fn::Sub: ${VPCName}-VpcId
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '5'
+
+  AlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref 'AlbTargetGroup'
+          Type: forward
+      LoadBalancerArn: !Ref 'Alb'
+      Port: 80
+      Protocol: HTTP
+
+
+  MySQLRDSDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub '${EnvironmentName}-mysql'
+      DBInstanceClass: !Ref 'MySQLRDSDatabaseDBInstanceClass'
+      Engine: MySQL
+      EngineVersion: 8.0.21
+      AllocatedStorage: !Ref 'MySQLRDSDatabaseAllocatedStorage'
+      StorageType: !Ref 'RDSStorageType'
+      MultiAZ: false
+      BackupRetentionPeriod: !Ref 'RDSBackupRetentionPeriod'
+      CopyTagsToSnapshot: true
+      AutoMinorVersionUpgrade: false
+      PreferredBackupWindow: '01:00-01:30'
+      PreferredMaintenanceWindow: Tue:02:00-Tue:02:30
+      MasterUsername: master
+      MasterUserPassword: !Ref MySQLRDSMasterPassword
+      PubliclyAccessible: false
+      DBSubnetGroupName: !ImportValue
+        Fn::Sub: ${VPCName}-RdsPrivateSubnetGroup
+      VPCSecurityGroups:
+        - !ImportValue
+          Fn::Sub: ${VPCName}-RdsSecurityGroup
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${VPCName}-${EnvironmentName}-${AppName}'
+
+  CloudwatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '${EnvironmentName}-${AppName}'
+      RetentionInDays: 7
+
+  ErrorMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      FilterPattern: 'ERROR'
+      LogGroupName: !Ref 'CloudwatchLogGroup'
+      MetricTransformations:
+        - DefaultValue: 0
+          MetricName: !Sub ${EnvironmentName}-${AppName}-errors
+          MetricNamespace: !Sub ${EnvironmentName}-${AppName}
+          MetricValue: '1'
+
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub ${EnvironmentName}-${AppName}
+      TopicName: !Sub ${EnvironmentName}-${AppName}
+
+  ServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: read-access
+          PolicyDocument:
+            Statement:
+              - Action:
+                  - s3:List
+                  - sns:List*
+                  - sqs:List*
+                Effect: Allow
+                Resource:
+                  - '*'
+        - PolicyName: s3-access
+          PolicyDocument:
+            Statement:
+              - Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:ListBucketVersions
+                  - s3:GetBucketVersioning
+                  - s3:ListBucket
+                  - s3:*
+                  - s3:PutObjectVersion
+                  - s3:PutObject
+                Effect: Allow
+                Resource:
+                  - !Sub arn:aws:s3:::${S3Bucket}
+                  - !Sub arn:aws:s3:::${S3Bucket}/*
+
+  ECSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+Outputs:
+  LoadBalancerUrl:
+    Description: URL of the load balancer
+    Value: !GetAtt Alb.DNSName
