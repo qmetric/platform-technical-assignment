@@ -1,0 +1,12 @@
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  annotations:
+    github.com/project-slug: qmetric/platform-technical-assignment
+  name: platform-technical-assignment
+spec:
+  lifecycle: experimental
+  owner: platform
+  system: platform
+  type: misc
